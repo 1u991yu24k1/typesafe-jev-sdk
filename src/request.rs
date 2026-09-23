@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use super::model::Question;
+use super::question::Question;
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct JevRequest {

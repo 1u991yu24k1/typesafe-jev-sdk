@@ -28,7 +28,19 @@ async fn main() {
         JevRequestBuilder::new()
         .model("jev-latest")
         .state("プレイヤーのHPは20%。敵が近くに3体いる。\n回復アイテムを1個持っている。")
-        .question("next_action", Question::choise())
+        .question(
+            "next_action", 
+            Question::choise(
+                "次に取る行動は?",
+                vec![
+                    ("heal",    "回復アイテムを使ってHPを回復する"),
+                    ("retreat", "敵から距離を取って退避する"),
+                    ("attack",  "近くの敵を攻撃する")
+                ]
+            )
+        )
+        .build()
+        .unwrap();
 
     let client = TypeSafeClient::new(Duration::from_secs(5));
     

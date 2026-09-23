@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use super::model::Question;
+use super::question::Question;
 use super::request::JevRequest;
 use super::error::JevError;
 
@@ -50,5 +50,38 @@ impl JevRequestBuilder {
             .ok_or(JevError::BuildError)?;
 
         Ok(JevRequest { model, state, questions })
+    }
+}
+
+#[cfg(test)]
+mod builder_tests {
+    use super::*;
+
+    #[test]
+    fn test_build_choise() {
+        let builder = JevRequestBuilder::new();
+
+        let req = 
+            builder
+            .model("jev-latest")
+            .state("プレイヤーのHPは20%。敵が近くに3体いる。\n回復アイテムを1個持っている。")
+            .question(
+                "next_action", 
+                Question::choice("次に取る行動は?",
+                    vec![
+                        ("heal",    "回復アイテムを使ってHPを回復する"),
+                        ("retreat", "敵から距離を取って退避する"),
+                        ("attack",  "近くの敵を攻撃する"),
+                    ]
+                )
+            )
+            .build();
+        
+        assert!(req.is_ok());
+    }
+
+    #[test]
+    fn test_build_noul() {
+
     }
 }
