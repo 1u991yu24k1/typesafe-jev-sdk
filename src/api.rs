@@ -1,14 +1,19 @@
 use std::time::Duration;
-use super::model::{Question, Answer};
+use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use reqwest::{Url, Client};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
+use super::model::{Question, Answer, Usage};
+
 
 #[derive(Deserialize, Serialize, Debug)]
-pub struct RequestBody {
+pub struct JevRequest {
     pub model: String,
     pub state: String,
     pub questions: HashMap<String, Question>,
 }
 
-impl RequestBody {
+impl JevRequest {
     pub fn new(
         model: impl Into<String>, 
         state: impl Into<String>, 
@@ -25,7 +30,12 @@ impl RequestBody {
     }
 }
 
-// Builder を作成する. 
+#[derive(Debug)]
+pub enum JevError {
+    BuildError,
+
+} 
+
 #[derive(Debug)]
 pub struct JevRequestBuilder {
     model: Option<String>,
@@ -39,48 +49,40 @@ impl JevRequestBuilder {
     }
 
     pub fn model(mut self, model_name: impl Into<String>) -> Self {
-        self.model = model_name.into();
+        self.model = Some(model_name.into());
         self 
     }
 
     pub fn state(mut self, state_expr: impl Into<String>) -> Self {
-        self.state = state_expr.into();
+        self.state = Some(state_expr.into());
         self
     }
 
-    pub fn question(
-        mut self, 
-        qkey: impl Into<String>, 
-        qval: Question
-    ) -> Self {
-        if self.questions.is_none() {
-            self.questions = HashMap::new();
-        }
+    /// question をセット. 
+    pub fn question(mut self, qkey: impl Into<String>, qval: Question) -> Self {
         let qkey = qkey.into();
+        if self.question.is_none() {
+            self.question = Some(HashMap::new());
+        }
+        if let Some(q) = &mut self.question {
+            q.insert(qkey, qval);
+        }
         self
     }
 
-    pub fn build(self) -> Result<RequestBody, String> {
-        let model = self.model.unwrap_or("jev-latest".to_string());
-        if self.state.is_none() {
-            return Err("hogehoge".to_string())
-        }        
-        let state = self.state.unwrap();
+    pub fn build(self) -> Result<JevRequest, JevError> {
+        let model = 
+            self.model.unwrap_or("jev-latest".to_string());
 
-        if let Some(q) = self.questions {
-            if questions.len() > 0 {
-                return Err("A")     
-            }
-        } else {
-            return Err("Any Questions?".to_string())
-        } 
-        let questions = questions.unwrap();
-        Ok(
-            JevRequestBody { 
-                model, 
-                state,
-            }
-        )
+        let state = 
+            self.state.ok_or(JevError::BuildError)?;
+
+        let questions = 
+            self.question
+            .and_then(|q| { if q.len() > 0 { Some(q) } else { None } } )
+            .ok_or(JevError::BuildError)?;
+
+        Ok(JevRequest { model, state, questions })
     }
 }
 
@@ -125,7 +127,7 @@ mod request_body_tests {
             }
             "#; 
 
-        let x = serde_json::from_str::<RequestBody>(&body).unwrap();
+        let x = serde_json::from_str::<JevRequest>(&body).unwrap();
         println!("{:}", serde_json::to_string(&x).unwrap());        
     }
 }
@@ -175,7 +177,7 @@ impl TypeSafeClient {
         Self { client, url, api_key } 
     }
 
-    pub async fn system_one(&self, request: &RequestBody) -> Result<ResponseBody, reqwest::Error> {
+    pub async fn system_one(&self, request: &JevRequest) -> Result<ResponseBody, reqwest::Error> {
         let resp = 
             self.client
             .post(self.url.as_str())
