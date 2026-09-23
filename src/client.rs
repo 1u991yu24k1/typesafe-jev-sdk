@@ -55,6 +55,10 @@ impl TypeSafeClient {
 }
 
 
+impl Default for TypeSafeClient {
+    fn default() -> Self { Self::new(Duration::from_secs(5)) }
+}
+
 impl fmt::Debug for TypeSafeClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TypeSafeClient")
