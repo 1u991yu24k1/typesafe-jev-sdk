@@ -13,6 +13,9 @@ typesafe-jev-sdk = { git = "https://github.com/1u991yu24k1/typesafe-jev-sdk.git"
 ```shell
 export TYPESAFE_API_BASE_URL="https://api.typesafe.ai/v1/systemone"
 export TYPESAFE_API_KEY="apikey_....."
+
+# Proxy Setting (Optional) 
+export HTTPS_PROXY="https://...."
 ```
 
 ## Quick Start
@@ -26,7 +29,7 @@ async fn main() {
         .state("プレイヤーのHPは20%。敵が近くに3体いる。\n回復アイテムを1個持っている。")
         .question(
             "next_action", 
-            Question::choise(
+            Question::choice(
                 "次に取る行動は?",
                 vec![
                     ("heal",    "回復アイテムを使ってHPを回復する"),
@@ -38,9 +41,11 @@ async fn main() {
         .build()
         .unwrap();
 
-    let client = TypeSafeClient::default();
-    
-    let resp = client.system_one(&request).unwrap();
+    let resp = 
+        TypeSafeClient::default()
+        .system_one(&request)
+        .await
+        .unwrap();
     println!("{:#?}", resp);
 }
 ```
