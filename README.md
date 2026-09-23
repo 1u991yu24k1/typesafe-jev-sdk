@@ -17,10 +17,6 @@ export TYPESAFE_API_KEY="apikey_....."
 
 ## Quick Start
 ```rust
-use std::time::Duration;
-use typesafe_jev_sdk::client::TypeSafeClient;
-use typesafe_jev_sdk::builder::JevRequestBuidler;
-use typesafe_jev_sdk::model::Question;
 
 #[tokio::main]
 async fn main() {
@@ -42,7 +38,7 @@ async fn main() {
         .build()
         .unwrap();
 
-    let client = TypeSafeClient::new(Duration::from_secs(5));
+    let client = TypeSafeClient::default();
     
     let resp = client.system_one(&request).unwrap();
     println!("{:#?}", resp);
