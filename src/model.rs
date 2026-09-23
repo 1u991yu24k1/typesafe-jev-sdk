@@ -1,11 +1,6 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize}; 
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Usage {
-    input_tokens: u64,
-    output_tokens: u64,
-}
 
 #[derive(Deserialize, Serialize, Debug, PartialEq)]
 #[serde(tag = "type", rename_all= "snake_case")]
@@ -175,14 +170,14 @@ mod tests {
     fn test_deserialize_score_from_str() {
         let v = r#"
         {
-                        "type": "score",
-                        "instructions": "現在の危険度は？",
-                        "criteria": [
-                          "低：差し迫った脅威がなく、安全に行動できる",
-                          "中：脅威があり、注意して行動する必要がある",
-                          "高：倒される危険が高く、直ちに対処する必要がある"
-                        ]
-                    } 
+            "type": "score",
+            "instructions": "現在の危険度は？",
+            "criteria": [
+                "低：差し迫った脅威がなく、安全に行動できる",
+                "中：脅威があり、注意して行動する必要がある",
+                "高：倒される危険が高く、直ちに対処する必要がある"
+            ]
+        } 
         "#;
         
         let x = 
