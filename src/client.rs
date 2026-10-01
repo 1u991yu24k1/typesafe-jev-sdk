@@ -2,85 +2,79 @@ use std::env;
 use std::fmt;
 use std::time::Duration;
 
-use reqwest::{Url, Client, Proxy};
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
 use super::request::JevRequest;
 use super::response::JevResponse;
-
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::{Client, Proxy, Url};
 
 fn proxy() -> Result<Option<Proxy>, Box<dyn std::error::Error>> {
-    let proxy_str_opt =  env::var("HTTPS_PROXY")
+    let proxy_str_opt = env::var("HTTPS_PROXY")
         .or_else(|_| env::var("https_proxy"))
         .or_else(|_| env::var("HTTP_PROXY"))
         .or_else(|_| env::var("http_proxy"))
         .ok();
 
-    match proxy_str_opt {
-        Some(s) => {
-            let proxy = Proxy::all(s)?;
-            Ok(Some(proxy))
-        },
-        None => { Ok(None) }
-    }
+    proxy_str_opt
+        .map(Proxy::all)
+        .transpose()
+        .map_err(Into::into)
 }
 
 pub struct TypeSafeClient {
     pub client: Client,
     pub url: Url,
-    api_key: String
+    api_key: String,
 }
 
 impl TypeSafeClient {
     pub fn new(timeout: Duration) -> Self {
         let mut headers = HeaderMap::new();
 
-        headers.insert(CONTENT_TYPE,  HeaderValue::from_static("application/json"));
-        headers.insert(ACCEPT,        HeaderValue::from_static("application/json"));
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
 
-        
-        let mut client_builder = 
-            reqwest::ClientBuilder::new()
+        let mut client_builder = reqwest::ClientBuilder::new()
             .connect_timeout(timeout)
             .default_headers(headers)
             .https_only(true);
-        
+
         if let Some(p) = proxy().unwrap() {
             client_builder = client_builder.proxy(p)
         }
-        
-        let client = client_builder
-            .build()
-            .unwrap();
-       
-        let url = 
-            Url::parse(
-                &env::var("TYPESAFE_API_BASE_URL")
-                    .unwrap_or("https://api.typesafe.ai/v1/systemone".to_string())
-            ).unwrap();
+
+        let client = client_builder.build().unwrap();
+
+        let url = Url::parse(
+            &env::var("TYPESAFE_API_BASE_URL")
+                .unwrap_or_else(|_| "https://api.typesafe.ai/v1/systemone".to_owned()),
+        )
+        .unwrap();
 
         let api_key = env::var("TYPESAFE_API_KEY").unwrap();
 
-        Self { client, url, api_key } 
+        Self {
+            client,
+            url,
+            api_key,
+        }
     }
 
     pub async fn system_one(&self, request: &JevRequest) -> Result<JevResponse, reqwest::Error> {
-        let resp = 
-            self.client
-            .post(self.url.as_str())
+        self.client
+            .post(self.url.clone())
             .bearer_auth(&self.api_key)
             .json(request)
             .send()
             .await?
             .json::<JevResponse>()
-            .await?;
-
-        Ok(resp)
+            .await
     }
 }
 
-
 impl Default for TypeSafeClient {
-    fn default() -> Self { Self::new(Duration::from_secs(5)) }
+    fn default() -> Self {
+        Self::new(Duration::from_secs(5))
+    }
 }
 
 impl fmt::Debug for TypeSafeClient {
@@ -93,38 +87,245 @@ impl fmt::Debug for TypeSafeClient {
     }
 }
 
-
 #[cfg(test)]
 mod client_tests {
     use super::*;
-    use crate::question::Question;
+    use crate::answer::Answer;
     use crate::builder::JevRequestBuilder;
+    use crate::question::Question;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
 
-    #[tokio::test]
-    async fn test_build_client() {
-        let request = 
-            JevRequestBuilder::new()
-            .model("jev-latest")
-            .state("プレイヤーのHPは20%。敵が近くに3体いる。\n回復アイテムを1個持っている。")
+    // Use an ephemeral loopback server, never the live API or environment keys.
+    async fn mock_client(status: &str, body: &str) -> (TypeSafeClient, JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!(
+            "http://{}/systemone",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut received = Vec::new();
+            let mut buffer = [0; 1024];
+            loop {
+                let size = stream.read(&mut buffer).await.unwrap();
+                assert_ne!(size, 0, "client closed before sending its request");
+                received.extend_from_slice(&buffer[..size]);
+                if let Some(header_end) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = std::str::from_utf8(&received[..header_end]).unwrap();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .expect("JSON request has a content length");
+                    if received.len() >= header_end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            stream.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(received).unwrap()
+        });
+        let client = TypeSafeClient {
+            client: Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            url,
+            api_key: "test-key".to_owned(),
+        };
+        (client, server)
+    }
+
+    fn request() -> JevRequest {
+        JevRequestBuilder::new()
+            .state("状態")
             .question(
-                "next_action", 
-                Question::choice(
-                    "次に取る行動は?",
-                    vec![
-                        ("heal",    "回復アイテムを使ってHPを回復する"),
-                        ("retreat", "敵から距離を取って退避する"),
-                        ("attack",  "近くの敵を攻撃する")
-                    ]
-                )
+                "ready",
+                Question::Noul {
+                    instructions: "Ready?".to_owned(),
+                    criteria: None,
+                },
             )
             .build()
+            .unwrap()
+    }
+
+    const RESPONSE: &str = r#"{"model":"jev-latest","usage":{"input_tokens":2,"output_tokens":3},"answers":{"ready":{"type":"noul","noul":0.82}}}"#;
+
+    #[tokio::test]
+    async fn sends_authenticated_json_and_decodes_response() {
+        let (client, server) = mock_client("200 OK", RESPONSE).await;
+        let request = request();
+        let response = client.system_one(&request).await.unwrap();
+        let received = server.await.unwrap();
+        let (headers, body) = received.split_once("\r\n\r\n").unwrap();
+        let headers = headers.to_ascii_lowercase();
+
+        assert!(headers.starts_with("post /systemone http/1.1\r\n"));
+        assert!(
+            headers
+                .lines()
+                .any(|line| line == "authorization: bearer test-key")
+        );
+        assert!(
+            headers
+                .lines()
+                .any(|line| line == "content-type: application/json")
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body).unwrap(),
+            serde_json::to_value(request).unwrap()
+        );
+        assert_eq!(response.model, "jev-latest");
+        assert_eq!(response.usage.tokens(), 5);
+        assert_eq!(response.answers["ready"], Answer::Noul { noul: 0.82 });
+    }
+
+    #[tokio::test]
+    async fn malformed_json_returns_decode_error() {
+        let (client, server) = mock_client("200 OK", "not json").await;
+        assert!(client.system_one(&request()).await.unwrap_err().is_decode());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_response_shape_returns_decode_error() {
+        let (client, server) = mock_client("200 OK", "{}").await;
+        assert!(client.system_one(&request()).await.unwrap_err().is_decode());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn preserves_response_decoding_on_non_success_status() {
+        // This SDK currently decodes any HTTP status. A status policy change
+        // should be handled separately from this compatibility refactor.
+        let (client, server) = mock_client("400 Bad Request", RESPONSE).await;
+        assert_eq!(
+            client.system_one(&request()).await.unwrap().model,
+            "jev-latest"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn https_only_transport_reports_local_http_error() {
+        let (mut client, server) = mock_client("200 OK", RESPONSE).await;
+        client.client = Client::builder()
+            .no_proxy()
+            .https_only(true)
+            .build()
             .unwrap();
-    
-        let resp = 
-            TypeSafeClient::default()
-            .system_one(&request)
-            .await
-            .unwrap();
-        println!("{:#?}", resp);
+        let error = client.system_one(&request()).await.unwrap_err();
+        server.abort();
+        assert!(error.is_builder());
+    }
+
+    #[tokio::test]
+    async fn stalled_response_returns_timeout_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TypeSafeClient {
+            client: Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_millis(50))
+                .build()
+                .unwrap(),
+            url: Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap(),
+            api_key: "test-key".to_owned(),
+        };
+        // Keep the listener alive without sending a response.
+        let error = client.system_one(&request()).await.unwrap_err();
+        assert!(error.is_timeout());
+        drop(listener);
+    }
+
+    #[test]
+    fn construction_from_environment() {
+        const CHILD: &str = "JEV_SDK_CONFIG_TEST";
+        if let Ok(mode) = env::var(CHILD) {
+            if mode.starts_with("invalid") || mode == "missing-key" {
+                assert!(std::panic::catch_unwind(TypeSafeClient::default).is_err());
+            } else {
+                let client = TypeSafeClient::default();
+                let expected = if mode == "custom-url" {
+                    "https://example.invalid/custom"
+                } else {
+                    "https://api.typesafe.ai/v1/systemone"
+                };
+                assert_eq!(client.url.as_str(), expected);
+                assert_eq!(client.api_key, "test-key");
+            }
+            return;
+        }
+
+        // Rust 2024 environment mutation is unsafe in a multithreaded process.
+        // Give each configuration its own child process instead, without keys
+        // or proxy settings inherited from the developer's environment.
+        for mode in [
+            "default",
+            "custom-url",
+            "missing-key",
+            "invalid-url",
+            "invalid-proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+        ] {
+            let mut command = std::process::Command::new(env::current_exe().unwrap());
+            command
+                .env_clear()
+                .env(CHILD, mode)
+                .arg("--exact")
+                .arg("client::client_tests::construction_from_environment");
+            // Keep coverage profiles separate via cargo-llvm-cov's %p pattern.
+            if let Some(profile) = env::var_os("LLVM_PROFILE_FILE") {
+                command.env("LLVM_PROFILE_FILE", profile);
+            }
+            if mode != "missing-key" {
+                command.env("TYPESAFE_API_KEY", "test-key");
+            }
+            match mode {
+                "custom-url" => {
+                    command.env("TYPESAFE_API_BASE_URL", "https://example.invalid/custom");
+                }
+                "invalid-url" => {
+                    command.env("TYPESAFE_API_BASE_URL", "not a URL");
+                }
+                "invalid-proxy" => {
+                    command.env("HTTPS_PROXY", "http://[");
+                }
+                "HTTPS_PROXY" | "https_proxy" | "HTTP_PROXY" | "http_proxy" => {
+                    command.env(mode, "http://127.0.0.1:8080");
+                }
+                _ => {}
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{mode}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn debug_output_redacts_api_key() {
+        let (client, server) = mock_client("200 OK", RESPONSE).await;
+        let debug = format!("{client:?}");
+        server.abort();
+        assert!(!debug.contains("test-key"));
+        assert!(debug.contains("***********"));
     }
 }

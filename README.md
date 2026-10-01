@@ -51,3 +51,31 @@ async fn main() {
 ```
 
 
+## Development
+
+通常のテストは API キーや外部 API 接続を必要としません。クライアントの通信は
+ローカルの一時 HTTP サーバーで検証します。
+
+```sh
+cargo test --locked
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+```
+
+ベンチマークはリクエスト構築処理のみを測定します。実 API の応答時間を測るものではありません。
+
+```sh
+cargo bench --locked --bench builder
+cargo bench --locked --bench allocations
+```
+
+カバレッジ計測には `cargo-llvm-cov` と `llvm-tools-preview` が必要です。
+
+```sh
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov --locked
+cargo llvm-cov --locked --html
+```
+
+`Usage::exceeds_budget` は入力・出力のいずれかが対応する上限を **超えた** 場合に
+`true` を返します。上限と同じ値は超過とは見なしません。
