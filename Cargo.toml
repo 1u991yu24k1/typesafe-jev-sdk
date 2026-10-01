@@ -11,3 +11,10 @@ reqwest = { version = "0.13", features=["json"]}
 
 [dev-dependencies]
 serde_json = "1"
+[[bench]]
+name = "builder"
+harness = false
+
+[[bench]]
+name = "allocations"
+harness = false

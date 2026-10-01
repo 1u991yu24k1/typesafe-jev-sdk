@@ -1,6 +1,6 @@
-use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
 use super::question::Question;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct JevRequest {
@@ -11,10 +11,10 @@ pub struct JevRequest {
 
 impl JevRequest {
     pub fn new(model: impl Into<String>, state: impl Into<String>) -> Self {
-        Self { 
-            state: state.into(), 
-            model: model.into(), 
-            questions: HashMap::<String, Question>::new()
+        Self {
+            state: state.into(),
+            model: model.into(),
+            questions: HashMap::<String, Question>::new(),
         }
     }
 
@@ -28,8 +28,7 @@ mod request_body_tests {
     use super::*;
     #[test]
     fn test_request_body() {
-        let body = 
-            r#"
+        let body = r#"
             {
                 "state": "プレイヤーのHPは20%。敵が近くに3体いる。\n回復アイテムを1個持っている。",
                 "model": "jev-latest",
@@ -62,11 +61,9 @@ mod request_body_tests {
                     }
                 }
             }
-            "#; 
+            "#;
 
-        let x = serde_json::from_str::<JevRequest>(&body).unwrap();
-        println!("{:}", serde_json::to_string(&x).unwrap());        
+        let x = serde_json::from_str::<JevRequest>(body).unwrap();
+        println!("{:}", serde_json::to_string(&x).unwrap());
     }
 }
-
-
