@@ -1,5 +1,5 @@
 use super::error::JevError;
-use super::question::Question;
+use super::question::{Question, valid_candidate_id};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -39,9 +39,9 @@ impl JevRequest {
                     }
                     if criteria
                         .iter()
-                        .any(|(id, label)| id.trim().is_empty() || label.trim().is_empty())
+                        .any(|(id, label)| !valid_candidate_id(id) || label.trim().is_empty())
                     {
-                        return Err(JevError::Validation("empty choice ID or label"));
+                        return Err(JevError::Validation("invalid choice ID or label"));
                     }
                 }
                 Question::Score {
@@ -63,11 +63,12 @@ impl JevRequest {
                         return Err(JevError::Validation("empty question instructions"));
                     }
                     if criteria.as_ref().is_some_and(|labels| {
-                        labels
-                            .iter()
-                            .any(|(id, label)| id.trim().is_empty() || label.trim().is_empty())
+                        labels.is_empty()
+                            || labels.iter().any(|(id, label)| {
+                                !valid_candidate_id(id) || label.trim().is_empty()
+                            })
                     }) {
-                        return Err(JevError::Validation("empty noul criterion ID or label"));
+                        return Err(JevError::Validation("invalid noul criteria"));
                     }
                 }
             }
@@ -129,6 +130,6 @@ mod request_body_tests {
             "#;
 
         let x = serde_json::from_str::<JevRequest>(body).unwrap();
-        println!("{:}", serde_json::to_string(&x).unwrap());
+        assert!(serde_json::to_string(&x).is_ok());
     }
 }

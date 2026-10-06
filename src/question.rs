@@ -1,3 +1,4 @@
+use crate::error::JevError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -25,6 +26,42 @@ pub enum Question {
 }
 
 impl Question {
+    /// Strict alternative to `choice`, rejecting duplicate IDs before map insertion.
+    /// IDs must be nonempty and contain no whitespace or control characters.
+    /// This is an SDK opt-in policy, not an inferred service-side syntax limit.
+    pub fn try_choice(
+        inst: impl Into<String>,
+        criteria: Vec<(impl Into<String>, impl Into<String>)>,
+    ) -> Result<Self, JevError> {
+        let instructions = inst.into();
+        if instructions.trim().is_empty() {
+            return Err(JevError::Validation("empty question instructions"));
+        }
+        let candidates = strict_candidates(criteria)?;
+        Ok(Self::Choice {
+            instructions,
+            criteria: candidates,
+        })
+    }
+
+    /// Strict alternative to `noul`. A present criterion list must be nonempty,
+    /// with unique IDs using the same opt-in ID policy as `try_choice`.
+    /// No service-specific criterion names are assumed.
+    pub fn try_noul(
+        inst: impl Into<String>,
+        criteria: Option<Vec<(impl Into<String>, impl Into<String>)>>,
+    ) -> Result<Self, JevError> {
+        let instructions = inst.into();
+        if instructions.trim().is_empty() {
+            return Err(JevError::Validation("empty question instructions"));
+        }
+        let criteria = criteria.map(strict_candidates).transpose()?;
+        Ok(Self::Noul {
+            instructions,
+            criteria,
+        })
+    }
+
     pub fn choice(
         inst: impl Into<String>,
         criteria: Vec<(impl Into<String>, impl Into<String>)>,
@@ -59,6 +96,30 @@ impl Question {
             criteria,
         }
     }
+}
+
+pub(crate) fn valid_candidate_id(id: &str) -> bool {
+    !id.is_empty() && !id.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+fn strict_candidates(
+    criteria: Vec<(impl Into<String>, impl Into<String>)>,
+) -> Result<HashMap<String, String>, JevError> {
+    if criteria.is_empty() {
+        return Err(JevError::Validation("empty candidates"));
+    }
+    let mut candidates = HashMap::with_capacity(criteria.len());
+    for (id, label) in criteria {
+        let id = id.into();
+        let label = label.into();
+        if !valid_candidate_id(&id) || label.trim().is_empty() {
+            return Err(JevError::Validation("invalid candidate ID or label"));
+        }
+        if candidates.insert(id, label).is_some() {
+            return Err(JevError::Validation("duplicate candidate ID"));
+        }
+    }
+    Ok(candidates)
 }
 
 #[cfg(test)]
