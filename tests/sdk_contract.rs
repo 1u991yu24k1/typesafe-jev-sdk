@@ -1,6 +1,58 @@
 //! Offline checks for the SDK's public construction and JSON contracts.
 use serde_json::{Value, json};
-use typesafe_jev_sdk::{Answer, JevRequest, JevResponse, Question, Usage};
+use typesafe_jev_sdk::{Answer, JevRequest, JevResponse, Question, ResponseValidationError, Usage};
+
+#[test]
+fn optional_response_validation_rejects_semantic_errors() {
+    let mut request = JevRequest::new("jev-latest", "state");
+    request.add_question("choice", Question::choice("pick", vec![("a", "A")]));
+    let answer = json!({"type":"choice","choice":"a","confidence":0.8,"probabilities":{"a":1.0}});
+    let make_response = |answer: Value| -> JevResponse {
+        serde_json::from_value(json!({
+            "model":"jev-latest", "usage":{"input_tokens":1,"output_tokens":1},
+            "answers":{"choice":answer}
+        }))
+        .unwrap()
+    };
+    assert!(
+        make_response(answer.clone())
+            .validate_against(&request)
+            .is_ok()
+    );
+    let mut bad = answer.clone();
+    bad["choice"] = json!("other");
+    assert!(matches!(
+        make_response(bad).validate_against(&request),
+        Err(ResponseValidationError::UnknownChoice(_))
+    ));
+    let mut bad = answer.clone();
+    bad["confidence"] = json!(1.1);
+    assert!(matches!(
+        make_response(bad).validate_against(&request),
+        Err(ResponseValidationError::InvalidValue(_))
+    ));
+    let mut bad = answer.clone();
+    bad["probabilities"] = json!({"other":0.5});
+    assert!(matches!(
+        make_response(bad).validate_against(&request),
+        Err(ResponseValidationError::UnknownChoice(_))
+    ));
+    let mut bad = answer;
+    bad["type"] = json!("noul");
+    bad["noul"] = json!(0.5);
+    assert!(matches!(
+        make_response(bad).validate_against(&request),
+        Err(ResponseValidationError::MismatchedAnswerType(_))
+    ));
+    let missing: JevResponse = serde_json::from_value(json!({
+        "model":"jev-latest", "usage":{"input_tokens":1,"output_tokens":1},"answers":{}
+    }))
+    .unwrap();
+    assert!(matches!(
+        missing.validate_against(&request),
+        Err(ResponseValidationError::MissingAnswer(_))
+    ));
+}
 
 fn assert_question_round_trip(question: Question, expected: Value) {
     let encoded = serde_json::to_value(&question).unwrap();
@@ -282,12 +334,29 @@ fn usage_constructor_and_safe_token_boundaries_round_trip() {
         (u64::MAX - 1, 1, u64::MAX),
     ] {
         let usage = Usage::as_budget(input, output);
+        assert_eq!(usage.input_tokens(), input);
+        assert_eq!(usage.output_tokens(), output);
+        assert_eq!(usage.checked_tokens(), Some(total));
         assert_eq!(usage.tokens(), total);
         let payload = json!({"input_tokens": input, "output_tokens": output});
         assert_eq!(serde_json::to_value(&usage).unwrap(), payload);
         let decoded: Usage = serde_json::from_value(payload).unwrap();
         assert_eq!(decoded.tokens(), total);
     }
+}
+
+#[test]
+fn usage_overflow_is_detectable_and_raw_counts_remain_available() {
+    let usage = Usage::as_budget(u64::MAX, 1);
+    assert_eq!(usage.checked_tokens(), None);
+    assert_eq!(usage.tokens(), u64::MAX);
+    assert_eq!(usage.input_tokens(), u64::MAX);
+    assert_eq!(usage.output_tokens(), 1);
+    assert!(usage.checked_add(&Usage::as_budget(1, 0)).is_none());
+    let total = Usage::as_budget(2, 3)
+        .checked_add(&Usage::as_budget(4, 5))
+        .unwrap();
+    assert_eq!((total.input_tokens(), total.output_tokens()), (6, 8));
 }
 
 #[test]

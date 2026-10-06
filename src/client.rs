@@ -1,24 +1,12 @@
-use std::env;
 use std::fmt;
 use std::time::Duration;
 
+use super::config::Config;
+use super::error::JevError;
 use super::request::JevRequest;
 use super::response::JevResponse;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::{Client, Proxy, Url};
-
-fn proxy() -> Result<Option<Proxy>, Box<dyn std::error::Error>> {
-    let proxy_str_opt = env::var("HTTPS_PROXY")
-        .or_else(|_| env::var("https_proxy"))
-        .or_else(|_| env::var("HTTP_PROXY"))
-        .or_else(|_| env::var("http_proxy"))
-        .ok();
-
-    proxy_str_opt
-        .map(Proxy::all)
-        .transpose()
-        .map_err(Into::into)
-}
 
 pub struct TypeSafeClient {
     pub client: Client,
@@ -28,46 +16,75 @@ pub struct TypeSafeClient {
 
 impl TypeSafeClient {
     pub fn new(timeout: Duration) -> Self {
+        Self::try_new(Config::from_env(timeout).expect("invalid TypeSafe SDK configuration"))
+            .expect("failed to construct TypeSafe SDK client")
+    }
+
+    pub fn try_new(config: Config) -> Result<Self, JevError> {
         let mut headers = HeaderMap::new();
 
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
 
         let mut client_builder = reqwest::ClientBuilder::new()
-            .connect_timeout(timeout)
+            .connect_timeout(config.connect_timeout)
+            .timeout(config.request_timeout)
             .default_headers(headers)
-            .https_only(true);
+            .https_only(!config.allow_http_for_testing);
 
-        if let Some(p) = proxy().unwrap() {
+        if config.endpoint.scheme() != "https"
+            && !(config.allow_http_for_testing && config.endpoint.scheme() == "http")
+        {
+            return Err(JevError::InvalidUrl);
+        }
+        if let Some(ref proxy_url) = config.proxy {
+            let p = Proxy::all(proxy_url).map_err(|_| JevError::InvalidProxy)?;
             client_builder = client_builder.proxy(p)
         }
 
-        let client = client_builder.build().unwrap();
-
-        let url = Url::parse(
-            &env::var("TYPESAFE_API_BASE_URL")
-                .unwrap_or_else(|_| "https://api.typesafe.ai/v1/systemone".to_owned()),
-        )
-        .unwrap();
-
-        let api_key = env::var("TYPESAFE_API_KEY").unwrap();
-
-        Self {
+        let client = client_builder.build().map_err(JevError::ClientBuild)?;
+        Ok(Self {
             client,
-            url,
-            api_key,
-        }
+            url: config.endpoint,
+            api_key: config.api_key,
+        })
     }
 
-    pub async fn system_one(&self, request: &JevRequest) -> Result<JevResponse, reqwest::Error> {
-        self.client
+    pub async fn system_one(&self, request: &JevRequest) -> Result<JevResponse, JevError> {
+        let mut response = self
+            .client
             .post(self.url.clone())
             .bearer_auth(&self.api_key)
             .json(request)
             .send()
-            .await?
+            .await
+            .map_err(|e| JevError::Transport(e.without_url()))?;
+        let status = response.status();
+        if !status.is_success() {
+            const MAX_ERROR_BODY_BYTES: usize = 1024;
+            let mut bytes = Vec::new();
+            while bytes.len() < MAX_ERROR_BODY_BYTES {
+                let Some(chunk) = response
+                    .chunk()
+                    .await
+                    .map_err(|e| JevError::Transport(e.without_url()))?
+                else {
+                    break;
+                };
+                let remaining = MAX_ERROR_BODY_BYTES - bytes.len();
+                bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            }
+            let body = String::from_utf8_lossy(&bytes).replace(&self.api_key, "[REDACTED]");
+            return Err(JevError::HttpStatus {
+                status,
+                retryable: status.as_u16() == 429 || status.is_server_error(),
+                body,
+            });
+        }
+        response
             .json::<JevResponse>()
             .await
+            .map_err(|e| JevError::Decode(e.without_url()))
     }
 }
 
@@ -81,7 +98,7 @@ impl fmt::Debug for TypeSafeClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TypeSafeClient")
             .field("client", &self.client)
-            .field("url", &self.url)
+            .field("url", &"[REDACTED]")
             .field("apikey", &"***********")
             .finish()
     }
@@ -93,6 +110,7 @@ mod client_tests {
     use crate::answer::Answer;
     use crate::builder::JevRequestBuilder;
     use crate::question::Question;
+    use std::env;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
@@ -207,14 +225,30 @@ mod client_tests {
     }
 
     #[tokio::test]
-    async fn preserves_response_decoding_on_non_success_status() {
-        // This SDK currently decodes any HTTP status. A status policy change
-        // should be handled separately from this compatibility refactor.
-        let (client, server) = mock_client("400 Bad Request", RESPONSE).await;
-        assert_eq!(
-            client.system_one(&request()).await.unwrap().model,
-            "jev-latest"
-        );
+    async fn non_success_is_typed_even_with_success_shaped_json() {
+        for (status, code, retryable) in [
+            ("400 Bad Request", 400, false),
+            ("401 Unauthorized", 401, false),
+            ("429 Too Many Requests", 429, true),
+            ("500 Internal Server Error", 500, true),
+        ] {
+            let (client, server) = mock_client(status, RESPONSE).await;
+            let error = client.system_one(&request()).await.unwrap_err();
+            assert_eq!(error.status().unwrap().as_u16(), code);
+            assert_eq!(error.retryable(), retryable);
+            assert_eq!(error.error_body(), Some(RESPONSE));
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn error_body_is_bounded_and_key_is_redacted() {
+        let body = format!("test-key{}", "x".repeat(3000));
+        let (client, server) = mock_client("500 Internal Server Error", &body).await;
+        let error = client.system_one(&request()).await.unwrap_err();
+        assert!(!error.error_body().unwrap().contains("test-key"));
+        assert!(!format!("{error:?}").contains("test-key"));
+        assert!(error.error_body().unwrap().len() <= 1024 + 10);
         server.await.unwrap();
     }
 
@@ -228,21 +262,21 @@ mod client_tests {
             .unwrap();
         let error = client.system_one(&request()).await.unwrap_err();
         server.abort();
-        assert!(error.is_builder());
+        assert!(matches!(error, JevError::Transport(e) if e.is_builder()));
     }
 
     #[tokio::test]
     async fn stalled_response_returns_timeout_error() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let client = TypeSafeClient {
-            client: Client::builder()
-                .no_proxy()
-                .timeout(Duration::from_millis(50))
-                .build()
-                .unwrap(),
-            url: Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap(),
-            api_key: "test-key".to_owned(),
-        };
+        let config = Config::new(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            "test-key",
+        )
+        .unwrap()
+        .allow_http_for_testing()
+        .connect_timeout(Duration::from_secs(2))
+        .request_timeout(Duration::from_millis(50));
+        let client = TypeSafeClient::try_new(config).unwrap();
         // Keep the listener alive without sending a response.
         let error = client.system_one(&request()).await.unwrap_err();
         assert!(error.is_timeout());

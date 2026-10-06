@@ -1,3 +1,4 @@
+use super::error::JevError;
 use super::question::Question;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -10,6 +11,70 @@ pub struct JevRequest {
 }
 
 impl JevRequest {
+    /// Validate a request without changing its wire format or permissive constructors.
+    pub fn validate_strict(&self) -> Result<(), JevError> {
+        if self.model.trim().is_empty() {
+            return Err(JevError::Validation("empty model"));
+        }
+        if self.state.trim().is_empty() {
+            return Err(JevError::Validation("empty state"));
+        }
+        if self.questions.is_empty() {
+            return Err(JevError::Validation("no questions"));
+        }
+        for (id, question) in &self.questions {
+            if id.trim().is_empty() {
+                return Err(JevError::Validation("empty question key"));
+            }
+            match question {
+                Question::Choice {
+                    instructions,
+                    criteria,
+                } => {
+                    if instructions.trim().is_empty() {
+                        return Err(JevError::Validation("empty question instructions"));
+                    }
+                    if criteria.is_empty() {
+                        return Err(JevError::Validation("empty choice candidates"));
+                    }
+                    if criteria
+                        .iter()
+                        .any(|(id, label)| id.trim().is_empty() || label.trim().is_empty())
+                    {
+                        return Err(JevError::Validation("empty choice ID or label"));
+                    }
+                }
+                Question::Score {
+                    instructions,
+                    criteria,
+                } => {
+                    if instructions.trim().is_empty() {
+                        return Err(JevError::Validation("empty question instructions"));
+                    }
+                    if criteria.is_empty() || criteria.iter().any(|label| label.trim().is_empty()) {
+                        return Err(JevError::Validation("empty score candidates"));
+                    }
+                }
+                Question::Noul {
+                    instructions,
+                    criteria,
+                } => {
+                    if instructions.trim().is_empty() {
+                        return Err(JevError::Validation("empty question instructions"));
+                    }
+                    if criteria.as_ref().is_some_and(|labels| {
+                        labels
+                            .iter()
+                            .any(|(id, label)| id.trim().is_empty() || label.trim().is_empty())
+                    }) {
+                        return Err(JevError::Validation("empty noul criterion ID or label"));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(model: impl Into<String>, state: impl Into<String>) -> Self {
         Self {
             state: state.into(),
