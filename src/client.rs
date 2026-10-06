@@ -1,24 +1,12 @@
-use std::env;
 use std::fmt;
 use std::time::Duration;
 
+use super::config::Config;
+use super::error::JevError;
 use super::request::JevRequest;
 use super::response::JevResponse;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::{Client, Proxy, Url};
-
-fn proxy() -> Result<Option<Proxy>, Box<dyn std::error::Error>> {
-    let proxy_str_opt = env::var("HTTPS_PROXY")
-        .or_else(|_| env::var("https_proxy"))
-        .or_else(|_| env::var("HTTP_PROXY"))
-        .or_else(|_| env::var("http_proxy"))
-        .ok();
-
-    proxy_str_opt
-        .map(Proxy::all)
-        .transpose()
-        .map_err(Into::into)
-}
 
 pub struct TypeSafeClient {
     pub client: Client,
@@ -28,35 +16,38 @@ pub struct TypeSafeClient {
 
 impl TypeSafeClient {
     pub fn new(timeout: Duration) -> Self {
+        Self::try_new(Config::from_env(timeout).expect("invalid TypeSafe SDK configuration"))
+            .expect("failed to construct TypeSafe SDK client")
+    }
+
+    pub fn try_new(config: Config) -> Result<Self, JevError> {
         let mut headers = HeaderMap::new();
 
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
 
         let mut client_builder = reqwest::ClientBuilder::new()
-            .connect_timeout(timeout)
+            .connect_timeout(config.connect_timeout)
+            .timeout(config.request_timeout)
             .default_headers(headers)
-            .https_only(true);
+            .https_only(!config.allow_http_for_testing);
 
-        if let Some(p) = proxy().unwrap() {
+        if config.endpoint.scheme() != "https"
+            && !(config.allow_http_for_testing && config.endpoint.scheme() == "http")
+        {
+            return Err(JevError::InvalidUrl);
+        }
+        if let Some(ref proxy_url) = config.proxy {
+            let p = Proxy::all(proxy_url).map_err(|_| JevError::InvalidProxy)?;
             client_builder = client_builder.proxy(p)
         }
 
-        let client = client_builder.build().unwrap();
-
-        let url = Url::parse(
-            &env::var("TYPESAFE_API_BASE_URL")
-                .unwrap_or_else(|_| "https://api.typesafe.ai/v1/systemone".to_owned()),
-        )
-        .unwrap();
-
-        let api_key = env::var("TYPESAFE_API_KEY").unwrap();
-
-        Self {
+        let client = client_builder.build().map_err(JevError::ClientBuild)?;
+        Ok(Self {
             client,
-            url,
-            api_key,
-        }
+            url: config.endpoint,
+            api_key: config.api_key,
+        })
     }
 
     pub async fn system_one(&self, request: &JevRequest) -> Result<JevResponse, reqwest::Error> {
@@ -81,7 +72,7 @@ impl fmt::Debug for TypeSafeClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TypeSafeClient")
             .field("client", &self.client)
-            .field("url", &self.url)
+            .field("url", &"[REDACTED]")
             .field("apikey", &"***********")
             .finish()
     }
@@ -93,6 +84,7 @@ mod client_tests {
     use crate::answer::Answer;
     use crate::builder::JevRequestBuilder;
     use crate::question::Question;
+    use std::env;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
