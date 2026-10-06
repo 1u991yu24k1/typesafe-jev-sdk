@@ -50,15 +50,41 @@ impl TypeSafeClient {
         })
     }
 
-    pub async fn system_one(&self, request: &JevRequest) -> Result<JevResponse, reqwest::Error> {
-        self.client
+    pub async fn system_one(&self, request: &JevRequest) -> Result<JevResponse, JevError> {
+        let mut response = self
+            .client
             .post(self.url.clone())
             .bearer_auth(&self.api_key)
             .json(request)
             .send()
-            .await?
+            .await
+            .map_err(|e| JevError::Transport(e.without_url()))?;
+        let status = response.status();
+        if !status.is_success() {
+            const MAX_ERROR_BODY_BYTES: usize = 1024;
+            let mut bytes = Vec::new();
+            while bytes.len() < MAX_ERROR_BODY_BYTES {
+                let Some(chunk) = response
+                    .chunk()
+                    .await
+                    .map_err(|e| JevError::Transport(e.without_url()))?
+                else {
+                    break;
+                };
+                let remaining = MAX_ERROR_BODY_BYTES - bytes.len();
+                bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            }
+            let body = String::from_utf8_lossy(&bytes).replace(&self.api_key, "[REDACTED]");
+            return Err(JevError::HttpStatus {
+                status,
+                retryable: status.as_u16() == 429 || status.is_server_error(),
+                body,
+            });
+        }
+        response
             .json::<JevResponse>()
             .await
+            .map_err(|e| JevError::Decode(e.without_url()))
     }
 }
 
@@ -199,14 +225,30 @@ mod client_tests {
     }
 
     #[tokio::test]
-    async fn preserves_response_decoding_on_non_success_status() {
-        // This SDK currently decodes any HTTP status. A status policy change
-        // should be handled separately from this compatibility refactor.
-        let (client, server) = mock_client("400 Bad Request", RESPONSE).await;
-        assert_eq!(
-            client.system_one(&request()).await.unwrap().model,
-            "jev-latest"
-        );
+    async fn non_success_is_typed_even_with_success_shaped_json() {
+        for (status, code, retryable) in [
+            ("400 Bad Request", 400, false),
+            ("401 Unauthorized", 401, false),
+            ("429 Too Many Requests", 429, true),
+            ("500 Internal Server Error", 500, true),
+        ] {
+            let (client, server) = mock_client(status, RESPONSE).await;
+            let error = client.system_one(&request()).await.unwrap_err();
+            assert_eq!(error.status().unwrap().as_u16(), code);
+            assert_eq!(error.retryable(), retryable);
+            assert_eq!(error.error_body(), Some(RESPONSE));
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn error_body_is_bounded_and_key_is_redacted() {
+        let body = format!("test-key{}", "x".repeat(3000));
+        let (client, server) = mock_client("500 Internal Server Error", &body).await;
+        let error = client.system_one(&request()).await.unwrap_err();
+        assert!(!error.error_body().unwrap().contains("test-key"));
+        assert!(!format!("{error:?}").contains("test-key"));
+        assert!(error.error_body().unwrap().len() <= 1024 + 10);
         server.await.unwrap();
     }
 
@@ -220,7 +262,7 @@ mod client_tests {
             .unwrap();
         let error = client.system_one(&request()).await.unwrap_err();
         server.abort();
-        assert!(error.is_builder());
+        assert!(matches!(error, JevError::Transport(e) if e.is_builder()));
     }
 
     #[tokio::test]
