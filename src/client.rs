@@ -27,6 +27,9 @@ impl TypeSafeClient {
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
 
         let mut client_builder = reqwest::ClientBuilder::new()
+            // Service-side idempotency and duplicate billing are not documented.
+            .retry(reqwest::retry::never())
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(config.connect_timeout)
             .timeout(config.request_timeout)
             .default_headers(headers)
@@ -289,6 +292,28 @@ mod client_tests {
                 .is_decode()
         );
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn configured_client_does_not_retry_http_errors_or_follow_post_redirects() {
+        for (status, code, headers) in [
+            ("429 Too Many Requests", 429, "Retry-After: 0\r\n"),
+            ("503 Service Unavailable", 503, "Retry-After: 0\r\n"),
+            ("307 Temporary Redirect", 307, "Location: /replayed\r\n"),
+            ("308 Permanent Redirect", 308, "Location: /replayed\r\n"),
+        ] {
+            // The server handles one request only. Replaying it cannot return
+            // this HTTP error and would instead fail to connect to the server.
+            let (mock, server) =
+                mock_client_with_headers(status, "", headers, Duration::ZERO).await;
+            let config = Config::new(mock.url.as_str(), "test-key")
+                .unwrap()
+                .allow_http_for_testing();
+            let client = TypeSafeClient::try_new(config).unwrap();
+            let error = client.system_one(&request()).await.unwrap_err();
+            assert_eq!(error.status().unwrap().as_u16(), code);
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]

@@ -30,6 +30,9 @@ impl JevError {
         }
     }
 
+    /// Status-based hint for 429 and 5xx, not permission to replay a POST.
+    /// Service-side idempotency and billing must be confirmed separately.
+    /// The SDK does not retry automatically.
     pub fn retryable(&self) -> bool {
         matches!(
             self,
