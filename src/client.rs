@@ -268,15 +268,15 @@ mod client_tests {
     #[tokio::test]
     async fn stalled_response_returns_timeout_error() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let client = TypeSafeClient {
-            client: Client::builder()
-                .no_proxy()
-                .timeout(Duration::from_millis(50))
-                .build()
-                .unwrap(),
-            url: Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap(),
-            api_key: "test-key".to_owned(),
-        };
+        let config = Config::new(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            "test-key",
+        )
+        .unwrap()
+        .allow_http_for_testing()
+        .connect_timeout(Duration::from_secs(2))
+        .request_timeout(Duration::from_millis(50));
+        let client = TypeSafeClient::try_new(config).unwrap();
         // Keep the listener alive without sending a response.
         let error = client.system_one(&request()).await.unwrap_err();
         assert!(error.is_timeout());
