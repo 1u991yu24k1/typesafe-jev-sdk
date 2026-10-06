@@ -9,6 +9,8 @@ pub struct JevRequestBuilder {
     model: Option<String>,
     state: Option<String>,
     questions: HashMap<String, Question>,
+    strict_validation: bool,
+    duplicate_question_key: bool,
 }
 
 impl JevRequestBuilder {
@@ -28,7 +30,15 @@ impl JevRequestBuilder {
 
     /// Adds a question, replacing any question with the same key.
     pub fn question(mut self, qkey: impl Into<String>, qval: Question) -> Self {
-        self.questions.insert(qkey.into(), qval);
+        if self.questions.insert(qkey.into(), qval).is_some() {
+            self.duplicate_question_key = true;
+        }
+        self
+    }
+
+    /// Opt in to semantic request validation. The default builder remains permissive.
+    pub fn strict_validation(mut self) -> Self {
+        self.strict_validation = true;
         self
     }
 
@@ -38,12 +48,19 @@ impl JevRequestBuilder {
             return Err(JevError::BuildError);
         }
 
-        Ok(JevRequest {
+        if self.strict_validation && self.duplicate_question_key {
+            return Err(JevError::Validation("duplicate question key"));
+        }
+        let request = JevRequest {
             // Allocate the fallback only for a valid request without a model.
             model: self.model.unwrap_or_else(|| "jev-latest".to_owned()),
             state,
             questions: self.questions,
-        })
+        };
+        if self.strict_validation {
+            request.validate_strict()?;
+        }
+        Ok(request)
     }
 }
 
@@ -146,5 +163,52 @@ mod builder_tests {
         assert_eq!(request.model, "");
         assert_eq!(request.state, "");
         assert_eq!(request.questions[""], question(""));
+    }
+
+    #[test]
+    fn strict_builder_rejects_duplicate_and_empty_inputs() {
+        let duplicate = JevRequestBuilder::new()
+            .strict_validation()
+            .state("state")
+            .question("q", question("old"))
+            .question("q", question("new"))
+            .build();
+        assert!(matches!(
+            duplicate,
+            Err(JevError::Validation("duplicate question key"))
+        ));
+
+        for (model, state, key, q) in [
+            ("", "state", "q", question("ready")),
+            ("model", "", "q", question("ready")),
+            ("model", "state", "", question("ready")),
+            ("model", "state", "q", question("")),
+            (
+                "model",
+                "state",
+                "q",
+                Question::choice("pick", Vec::<(&str, &str)>::new()),
+            ),
+            (
+                "model",
+                "state",
+                "q",
+                Question::choice("pick", vec![("", "label")]),
+            ),
+            (
+                "model",
+                "state",
+                "q",
+                Question::score("score", Vec::<&str>::new()),
+            ),
+        ] {
+            let result = JevRequestBuilder::new()
+                .strict_validation()
+                .model(model)
+                .state(state)
+                .question(key, q)
+                .build();
+            assert!(matches!(result, Err(JevError::Validation(_))));
+        }
     }
 }

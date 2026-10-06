@@ -1,5 +1,6 @@
 pub enum JevError {
     BuildError,
+    Validation(&'static str),
     MissingApiKey,
     InvalidUrl,
     InvalidProxy,
@@ -51,6 +52,7 @@ impl std::fmt::Debug for JevError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::BuildError => f.write_str("BuildError"),
+            Self::Validation(reason) => f.debug_tuple("Validation").field(reason).finish(),
             Self::MissingApiKey => f.write_str("MissingApiKey"),
             Self::InvalidUrl => f.write_str("InvalidUrl"),
             Self::InvalidProxy => f.write_str("InvalidProxy"),
