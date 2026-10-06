@@ -53,6 +53,24 @@ async fn main() {
 
 ## Development
 
+### Response metadata
+
+`TypeSafeClient::system_one_with_metadata(&request)` は `JevResponseWithMetadata` を返します.
+`response` は従来の `JevResponse`, `metadata` は HTTP の観測情報です.
+
+- `metadata.status()`: 成功応答の HTTP ステータス.
+- `metadata.headers()`: 応答ヘッダー. Cookie 等の機密情報を含み得るため, 無加工でログに出さないでください.
+- `metadata.elapsed()`: リクエスト構築から本文受信と JSON デコードの完了までの時間. 呼び出し側での検証時間は含みません.
+- `metadata.request_id(header_name)`: 明示指定したヘッダーの値. ヘッダーがない場合や文字列化できない場合は `None`.
+
+JEV API の request ID ヘッダー名は未確認です. SDK はヘッダー名を推測せず, ID を生成しません.
+このメソッドは自動再試行を行わず, 非 2xx, 通信失敗, 不正 JSON は従来と同じ `JevError` を返します.
+失敗時の所要時間やヘッダーをエラーに追加する変更は含みません.
+既存の `system_one` と API の JSON 形式は維持しています.
+メタデータとメタデータ付き応答の `Debug` はヘッダー値と応答本文を伏せます.
+
+### Local validation
+
 通常のテストは API キーや外部 API 接続を必要としません。クライアントの通信は
 ローカルの一時 HTTP サーバーで検証します。
 

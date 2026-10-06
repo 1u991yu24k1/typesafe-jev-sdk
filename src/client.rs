@@ -1,10 +1,10 @@
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::config::Config;
 use super::error::JevError;
 use super::request::JevRequest;
-use super::response::JevResponse;
+use super::response::{JevResponse, JevResponseWithMetadata, ResponseMetadata};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::{Client, Proxy, Url};
 
@@ -51,6 +51,18 @@ impl TypeSafeClient {
     }
 
     pub async fn system_one(&self, request: &JevRequest) -> Result<JevResponse, JevError> {
+        Ok(self.system_one_with_metadata(request).await?.response)
+    }
+
+    /// Send a single request and return HTTP metadata alongside the decoded response.
+    ///
+    /// No automatic retries are performed. HTTP status, transport and JSON errors
+    /// use the same policy as `system_one`. Metadata is returned only on success.
+    pub async fn system_one_with_metadata(
+        &self,
+        request: &JevRequest,
+    ) -> Result<JevResponseWithMetadata, JevError> {
+        let started = Instant::now();
         let mut response = self
             .client
             .post(self.url.clone())
@@ -81,10 +93,16 @@ impl TypeSafeClient {
                 body,
             });
         }
-        response
+        // JSON decoding consumes the response, so own its headers before decoding.
+        let headers = response.headers().to_owned();
+        let response = response
             .json::<JevResponse>()
             .await
-            .map_err(|e| JevError::Decode(e.without_url()))
+            .map_err(|e| JevError::Decode(e.without_url()))?;
+        Ok(JevResponseWithMetadata {
+            response,
+            metadata: ResponseMetadata::new(status, headers, started.elapsed()),
+        })
     }
 }
 
@@ -117,6 +135,15 @@ mod client_tests {
 
     // Use an ephemeral loopback server, never the live API or environment keys.
     async fn mock_client(status: &str, body: &str) -> (TypeSafeClient, JoinHandle<String>) {
+        mock_client_with_headers(status, body, "", Duration::ZERO).await
+    }
+
+    async fn mock_client_with_headers(
+        status: &str,
+        body: &str,
+        extra_headers: &str,
+        body_delay: Duration,
+    ) -> (TypeSafeClient, JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = Url::parse(&format!(
             "http://{}/systemone",
@@ -124,9 +151,10 @@ mod client_tests {
         ))
         .unwrap();
         let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{extra_headers}\r\n",
             body.len()
         );
+        let body = body.to_owned();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut received = Vec::new();
@@ -151,6 +179,10 @@ mod client_tests {
                 }
             }
             stream.write_all(response.as_bytes()).await.unwrap();
+            if !body_delay.is_zero() {
+                tokio::time::sleep(body_delay).await;
+            }
+            stream.write_all(body.as_bytes()).await.unwrap();
             String::from_utf8(received).unwrap()
         });
         let client = TypeSafeClient {
@@ -180,6 +212,84 @@ mod client_tests {
     }
 
     const RESPONSE: &str = r#"{"model":"jev-latest","usage":{"input_tokens":2,"output_tokens":3},"answers":{"ready":{"type":"noul","noul":0.82}}}"#;
+
+    #[tokio::test]
+    async fn metadata_preserves_headers_and_measures_body_reception() {
+        let body_delay = Duration::from_millis(20);
+        let (client, server) = mock_client_with_headers(
+            "201 Created",
+            RESPONSE,
+            "X-Test-Request-Id: test-id-not-real\r\nSet-Cookie: test-cookie-not-real\r\nSet-Cookie: second-test-cookie\r\nAuthorization: Bearer test-key\r\n",
+            body_delay,
+        ).await;
+        let result = client.system_one_with_metadata(&request()).await.unwrap();
+        server.await.unwrap();
+        assert_eq!(result.metadata.status(), reqwest::StatusCode::CREATED);
+        assert_eq!(
+            result.metadata.request_id("x-test-request-id"),
+            Some("test-id-not-real")
+        );
+        assert_eq!(
+            result.metadata.request_id("X-Test-Request-Id"),
+            Some("test-id-not-real")
+        );
+        assert_eq!(result.metadata.request_id("absent-id"), None);
+        assert_eq!(
+            result
+                .metadata
+                .headers()
+                .get_all("set-cookie")
+                .iter()
+                .count(),
+            2
+        );
+        assert!(result.metadata.elapsed() >= body_delay);
+        assert_eq!(
+            serde_json::to_value(&result.response).unwrap(),
+            serde_json::from_str::<serde_json::Value>(RESPONSE).unwrap()
+        );
+        let debug = format!("{result:?}");
+        for sensitive in [
+            "test-key",
+            "test-cookie-not-real",
+            "second-test-cookie",
+            "test-id-not-real",
+            "jev-latest",
+        ] {
+            assert!(!debug.contains(sensitive));
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_does_not_invent_request_id() {
+        let (client, server) = mock_client("200 OK", RESPONSE).await;
+        let result = client.system_one_with_metadata(&request()).await.unwrap();
+        assert_eq!(result.metadata.status(), reqwest::StatusCode::OK);
+        assert_eq!(result.metadata.request_id("x-test-request-id"), None);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn metadata_method_preserves_error_policy() {
+        let (client, server) = mock_client("429 Too Many Requests", RESPONSE).await;
+        let error = client
+            .system_one_with_metadata(&request())
+            .await
+            .unwrap_err();
+        assert_eq!(error.status(), Some(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        assert!(error.retryable());
+        server.await.unwrap();
+
+        let (client, server) = mock_client("200 OK", "not json").await;
+        assert!(
+            client
+                .system_one_with_metadata(&request())
+                .await
+                .unwrap_err()
+                .is_decode()
+        );
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn sends_authenticated_json_and_decodes_response() {

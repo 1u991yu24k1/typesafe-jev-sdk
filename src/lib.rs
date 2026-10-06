@@ -13,5 +13,7 @@ pub use config::Config;
 pub use error::JevError;
 pub use question::Question;
 pub use request::JevRequest;
-pub use response::{JevResponse, ResponseValidationError};
+pub use response::{
+    JevResponse, JevResponseWithMetadata, ResponseMetadata, ResponseValidationError,
+};
 pub use usage::Usage;
