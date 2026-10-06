@@ -23,14 +23,17 @@ impl Config {
         if api_key.is_empty() {
             return Err(JevError::MissingApiKey);
         }
-        Ok(Self {
+        let config = Self {
             endpoint,
             api_key,
             proxy: None,
             connect_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(30),
             allow_http_for_testing: false,
-        })
+        };
+        config.validate_key()?;
+        config.validate_endpoint()?;
+        Ok(config)
     }
 
     pub fn from_env(connect_timeout: Duration) -> Result<Self, JevError> {
@@ -65,6 +68,39 @@ impl Config {
         self.allow_http_for_testing = true;
         self
     }
+
+    pub(crate) fn validate(&self) -> Result<(), JevError> {
+        self.validate_key()?;
+        self.validate_endpoint()?;
+        if self.connect_timeout.is_zero() || self.request_timeout.is_zero() {
+            return Err(JevError::Validation("timeouts must be greater than zero"));
+        }
+        Ok(())
+    }
+
+    fn validate_key(&self) -> Result<(), JevError> {
+        if self.api_key.trim().is_empty() {
+            return Err(JevError::MissingApiKey);
+        }
+        // Restrict to visible ASCII so bearer header construction cannot fail
+        // later or embed control characters. Never include the key in errors.
+        if !self.api_key.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+            return Err(JevError::InvalidApiKey);
+        }
+        Ok(())
+    }
+
+    fn validate_endpoint(&self) -> Result<(), JevError> {
+        if !matches!(self.endpoint.scheme(), "http" | "https")
+            || self.endpoint.host_str().is_none()
+            || !self.endpoint.username().is_empty()
+            || self.endpoint.password().is_some()
+            || self.endpoint.fragment().is_some()
+        {
+            return Err(JevError::InvalidUrl);
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for Config {
@@ -82,6 +118,45 @@ impl std::fmt::Debug for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_invalid_credentials_urls_and_zero_timeouts() {
+        for key in ["test\nkey", "test\rkey", "test key", "テスト", "test\0key"] {
+            let error = Config::new("https://example.invalid", key).unwrap_err();
+            assert!(matches!(error, JevError::InvalidApiKey));
+            assert!(!format!("{error:?} {error}").contains(key));
+        }
+        assert!(matches!(
+            Config::new("https://example.invalid", "  "),
+            Err(JevError::MissingApiKey)
+        ));
+        for url in [
+            "ftp://example.invalid",
+            "https://user:password@example.invalid",
+            "https://example.invalid/#fragment",
+        ] {
+            assert!(matches!(
+                Config::new(url, "test-key"),
+                Err(JevError::InvalidUrl)
+            ));
+        }
+        let config = || Config::new("https://example.invalid", "test-key").unwrap();
+        for config in [
+            config().connect_timeout(Duration::ZERO),
+            config().request_timeout(Duration::ZERO),
+        ] {
+            assert!(matches!(
+                crate::client::TypeSafeClient::try_new(config),
+                Err(JevError::Validation(_))
+            ));
+        }
+        assert!(matches!(
+            crate::client::TypeSafeClient::try_new(
+                Config::new("http://127.0.0.1", "test-key").unwrap()
+            ),
+            Err(JevError::InvalidUrl)
+        ));
+    }
 
     #[test]
     fn fallible_config_distinguishes_missing_key_and_invalid_url() {

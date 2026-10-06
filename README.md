@@ -20,9 +20,11 @@ export HTTPS_PROXY="https://...."
 
 ## Quick Start
 ```rust
+use std::time::Duration;
+use typesafe_jev_sdk::{builder::JevRequestBuilder, client::TypeSafeClient, JevError, Question};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), JevError> {
     let request = 
         JevRequestBuilder::new()
         .model("jev-latest")
@@ -39,14 +41,16 @@ async fn main() {
             )
         )
         .build()
-        .unwrap();
+        ?;
 
     let resp = 
-        TypeSafeClient::default()
+        TypeSafeClient::new(Duration::from_secs(5))?
         .system_one(&request)
         .await
-        .unwrap();
-    println!("{:#?}", resp);
+        ?;
+    // 応答をそのままログに出さず, 呼び出し側で処理する.
+    let _usage = resp.usage;
+    Ok(())
 }
 ```
 
@@ -75,7 +79,7 @@ SDK が `try_new` / `new` で構築する HTTP クライアントは, 自動再�
 reqwest 0.13.5 は既定で protocol NACK を再試行しますが, SDK は `retry::never()` を明示指定します.
 307/308 による POST 本文の再送も避けるため, `redirect::Policy::none()` を指定します.
 3xx は既存の非 2xx ポリシーに従って `JevError::HttpStatus` になります.
-公開の `client` フィールドを外部で差し替えた場合は, このポリシーを保証できません.
+`client` と `url` は非公開で, 構築後に通信ポリシーを差し替えることはできません.
 
 2026-10-06 に確認した [公開 OpenAPI 0.2.0](https://api.typesafe.ai/openapi.json) と
 [ReDoc](https://api.typesafe.ai/redoc) は, POST `/v1/systemone` と usage を定義しています.
@@ -127,3 +131,31 @@ cargo llvm-cov --locked --html
 `Usage::input_tokens()` と `Usage::output_tokens()` は API が返した生の値を返します.
 厳密な合計と複数応答の累積には `checked_tokens()` と `checked_add()` を使用してください.
 互換 API の `tokens()` はオーバーフロー時に `u64::MAX` に飽和します.
+
+### Configuration and migration
+
+今回の変更はコンストラクターとフィールド公開範囲に破壊的変更を含みます.
+
+- `TypeSafeClient::new(timeout)` は `Result<TypeSafeClient, JevError>` を返します. `?` 等で設定エラーを処理してください.
+- panic を避けるため `TypeSafeClient::default()` は削除しました. `TypeSafeClient::new(Duration::from_secs(5))?` に置き換えてください.
+- `client` / `url` は非公開です. URL の参照には `endpoint()` を使います. 機密 query を含み得るため, 無加工でログに出さないでください.
+- 個別設定には `TypeSafeClient::try_new(Config::new(endpoint, key)?.connect_timeout(...).request_timeout(...))` を使います.
+- `TYPESAFE_API_BASE_URL` は完全な endpoint です. 非 HTTPS はクライアント構築時に拒否します. ローカルモックでは `Config::allow_http_for_testing()` を明示指定します.
+- userinfo / fragment を含む endpoint, 空の API キー, bearer ヘッダーに不適切な文字, ゼロの timeout は拒否します.
+- 接続 timeout の既定値は 5 秒, 全体 timeout は 30 秒です. `new(timeout)` の引数は接続 timeout のみを変更します.
+
+### Strict validation
+
+`JevRequestBuilder::strict_validation()` と `JevRequest::validate_strict()` は任意の検証です.
+既存の `choice` / `noul` コンストラクターと既定 Builder は引き続き permissive です.
+`Question::try_choice` / `try_noul` は map 化の前に候補 ID の重複を検出します.
+既に map 化された候補からは, 上書き前の重複を復元できません.
+厳格な候補 ID は空文字, 空白, 制御文字を拒否しますが, Unicode は許可します.
+これは SDK の opt-in 方針であり, API の許容文字を推定したものではありません.
+Noul の criteria は省略できますが, 厳格検証では明示的な空候補を拒否します.
+
+応答の意味検証は `response.validate_against(&request)` で行います.
+生の JSON デシリアライズとは分離されており, 自動適用しません.
+`JevError` の `Debug` / `Display` は HTTP 本文と下位エラーの文字列を伏せます.
+`error_body()` は最大 1024 バイトの受信断片から API キーを伏せた本文です.
+他の機密値を自動判定する機能ではないため, 無加工で保存やログ出力をしないでください.

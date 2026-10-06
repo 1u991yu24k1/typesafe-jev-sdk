@@ -422,3 +422,87 @@ fn tagged_variants_ignore_future_fields() {
     .unwrap();
     assert_eq!(answer, Answer::Noul { noul: 1.0 });
 }
+
+#[test]
+fn strict_candidate_constructors_reject_lossy_or_invalid_inputs() {
+    for criteria in [
+        vec![],
+        vec![("a", "old"), ("a", "new")],
+        vec![("", "label")],
+        vec![(" a", "label")],
+        vec![("a b", "label")],
+        vec![("a\0", "label")],
+        vec![("a", "  ")],
+    ] {
+        assert!(Question::try_choice("pick", criteria.clone()).is_err());
+        assert!(Question::try_noul("ready", Some(criteria)).is_err());
+    }
+    assert!(Question::try_choice(" ", vec![("a", "A")]).is_err());
+    assert!(Question::try_noul(" ", None::<Vec<(&str, &str)>>).is_err());
+    assert_eq!(
+        Question::try_choice("pick", vec![("回復", "A")]).unwrap(),
+        Question::choice("pick", vec![("回復", "A")])
+    );
+    assert_eq!(
+        Question::try_noul("ready", None::<Vec<(&str, &str)>>).unwrap(),
+        Question::noul("ready", None::<Vec<(&str, &str)>>)
+    );
+    assert_eq!(
+        Question::try_noul("ready", Some(vec![("true", "yes")])).unwrap(),
+        Question::noul("ready", Some(vec![("true", "yes")]))
+    );
+}
+
+#[test]
+fn strict_request_validation_checks_existing_candidate_maps() {
+    for question in [
+        Question::choice("pick", vec![("a b", "A")]),
+        Question::noul("ready", Some(vec![("a\0", "A")])),
+        Question::noul("ready", Some(Vec::<(&str, &str)>::new())),
+    ] {
+        let mut request = JevRequest::new("model", "state");
+        request.add_question("q", question);
+        assert!(request.validate_strict().is_err());
+    }
+}
+
+#[test]
+fn response_validation_rejects_nonfinite_and_out_of_range_values() {
+    use std::collections::HashMap;
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1, 1.1] {
+        let mut request = JevRequest::new("model", "state");
+        request.add_question("q", Question::choice("pick", vec![("a", "A")]));
+        for answer in [
+            Answer::Choice {
+                choice: "a".into(),
+                confidence: value,
+                probabilities: HashMap::new(),
+            },
+            Answer::Choice {
+                choice: "a".into(),
+                confidence: 1.0,
+                probabilities: HashMap::from([("a".into(), value)]),
+            },
+        ] {
+            let response = JevResponse {
+                model: "model".into(),
+                usage: Usage::as_budget(0, 0),
+                answers: HashMap::from([("q".into(), answer)]),
+            };
+            assert!(matches!(
+                response.validate_against(&request),
+                Err(ResponseValidationError::InvalidValue(_))
+            ));
+        }
+        request.add_question("q", Question::noul("ready", None::<Vec<(&str, &str)>>));
+        let response = JevResponse {
+            model: "model".into(),
+            usage: Usage::as_budget(0, 0),
+            answers: HashMap::from([("q".into(), Answer::Noul { noul: value })]),
+        };
+        assert!(matches!(
+            response.validate_against(&request),
+            Err(ResponseValidationError::InvalidValue(_))
+        ));
+    }
+}
