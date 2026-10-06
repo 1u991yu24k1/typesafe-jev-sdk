@@ -79,3 +79,7 @@ cargo llvm-cov --locked --html
 
 `Usage::exceeds_budget` は入力・出力のいずれかが対応する上限を **超えた** 場合に
 `true` を返します。上限と同じ値は超過とは見なしません。
+
+`Usage::input_tokens()` と `Usage::output_tokens()` は API が返した生の値を返します.
+厳密な合計と複数応答の累積には `checked_tokens()` と `checked_add()` を使用してください.
+互換 API の `tokens()` はオーバーフロー時に `u64::MAX` に飽和します.
